@@ -13,7 +13,9 @@ static HWND g_hDlg = NULL;
 static HFONT g_hFont = NULL;
 static HBITMAP g_hBitmap = NULL;
 static HMENU g_hMenu = NULL;
-static BOOL g_alwaysOnTop = FALSE;
+static BOOL g_bAlwaysOnTop = FALSE;
+static UINT g_uWidth = 600;
+static UINT g_uHeight = 400;
 
 void SetText(const WCHAR* text, LONG len) {
 	HWND hEdit = GetDlgItem(g_hDlg, IDC_EDIT1);
@@ -58,17 +60,30 @@ HFONT CreateBoldFont(HFONT hFont) {
 	return CreateFontIndirectW(&lf);
 }
 
+void GetNewWindowSize(HWND hDlg, int x, int y, int* cx, int* cy) {
+	RECT rekt = {0, 0, x, y};
+	AdjustWindowRectEx(&rekt, GetWindowLongW(hDlg, GWL_STYLE), FALSE, GetWindowLongW(hDlg, GWL_EXSTYLE));
+	*cx = rekt.right - rekt.left;
+	*cy = rekt.bottom - rekt.top;
+}
+
 void SaveOptions(HWND hDlg) {
 	HKEY hKey;
 	if(!RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\SonicTeam\\PSOBB\\chatlog", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL)) {
-		LONG data[3];
+		LONG data[7];
 		WINDOWPLACEMENT wndpl;
 		memset(&wndpl, 0, sizeof(WINDOWPLACEMENT));
 		wndpl.length = sizeof(WINDOWPLACEMENT);
 		GetWindowPlacement(hDlg, &wndpl);
-		data[0] = g_alwaysOnTop;
+		UINT b0 = g_bAlwaysOnTop;
+		UINT b1 = (((wndpl.flags & WPF_RESTORETOMAXIMIZED) == WPF_RESTORETOMAXIMIZED) || (wndpl.showCmd == SW_SHOWMAXIMIZED));
+		data[0] = b0 | (b1 << 1);
 		data[1] = wndpl.rcNormalPosition.left;
 		data[2] = wndpl.rcNormalPosition.top;
+		data[3] = wndpl.rcNormalPosition.bottom;
+		data[4] = wndpl.rcNormalPosition.right;
+		data[5] = wndpl.ptMaxPosition.x;
+		data[6] = wndpl.ptMaxPosition.y;
 		RegSetValueExW(hKey, L"OPTS", 0, REG_BINARY, (LPBYTE)data, sizeof(data));
 		RegCloseKey(hKey);
 	}
@@ -77,18 +92,33 @@ void SaveOptions(HWND hDlg) {
 void RestoreOptions(HWND hDlg) {
 	HKEY hKey;
 	if(!RegCreateKeyExW(HKEY_CURRENT_USER, L"SOFTWARE\\SonicTeam\\PSOBB\\chatlog", 0, NULL, 0, KEY_WRITE | KEY_QUERY_VALUE, NULL, &hKey, NULL)) {
-		LONG data[3];
+		LONG data[7];
 		DWORD cbData = sizeof(data);
 		DWORD dwType = REG_BINARY;
 		if (!RegQueryValueExW(hKey, L"OPTS", 0, &dwType, (LPBYTE)data, &cbData) && dwType == REG_BINARY && cbData >= sizeof(data)) {
-			g_alwaysOnTop = data[0];
-			if (g_alwaysOnTop) {
-				AllowSetForegroundWindow(-1);
+			WINDOWPLACEMENT wndpl;
+			memset(&wndpl, 0, sizeof(WINDOWPLACEMENT));
+			wndpl.length = sizeof(WINDOWPLACEMENT);
+			g_bAlwaysOnTop = data[0] & (1 << 0);
+			BOOL bMaximize = data[0] & (1 << 1);
+			wndpl.rcNormalPosition.left = data[1];
+			wndpl.rcNormalPosition.top = data[2];
+			wndpl.rcNormalPosition.bottom = data[3];
+			wndpl.rcNormalPosition.right = data[4];
+			wndpl.ptMaxPosition.x = data[5];
+			wndpl.ptMaxPosition.y = data[6];
+			wndpl.showCmd = bMaximize ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+			AllowSetForegroundWindow(-1);
+			SetWindowPlacement(hDlg, &wndpl);
+			if (g_bAlwaysOnTop || bMaximize) {
 				SetForegroundWindow(hDlg);
-				SetWindowPos(hDlg, HWND_TOPMOST, data[1], data[2], 0, 0, SWP_NOSIZE);
 			}
-			else {
-				SetWindowPos(hDlg, 0, data[1], data[2], 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+			if (bMaximize) {
+				ShowWindow(hDlg, SW_SHOWMAXIMIZED);
+				ShowWindowAsync(hDlg, SW_SHOWMAXIMIZED);
+			}
+			if (g_bAlwaysOnTop) {
+				SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
 			}
 		}
 		RegCloseKey(hKey);
@@ -118,7 +148,7 @@ INT_PTR __stdcall DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 			alwaysOnTop.dwTypeData = L"Always on top";
 			alwaysOnTop.cch = sizeof(L"Always on top")/sizeof(WCHAR);
 			alwaysOnTop.wID = 0x1010;
-			alwaysOnTop.fState = (g_alwaysOnTop ? MF_CHECKED : MF_UNCHECKED);
+			alwaysOnTop.fState = (g_bAlwaysOnTop ? MF_CHECKED : MF_UNCHECKED);
 
 			MENUITEMINFOW clearLog;
 			memset(&clearLog, 0, sizeof(MENUITEMINFOW));
@@ -135,10 +165,20 @@ INT_PTR __stdcall DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 			separator.fMask = MIIM_FTYPE;
 			separator.fType = MFT_SEPARATOR;
 
+			MENUITEMINFOW restoreDefaults;
+			memset(&restoreDefaults, 0, sizeof(MENUITEMINFOW));
+			restoreDefaults.cbSize = sizeof(MENUITEMINFOW);
+			restoreDefaults.fMask = MIIM_FTYPE | MIIM_STRING | MIIM_ID;
+			restoreDefaults.fType = MFT_STRING;
+			restoreDefaults.dwTypeData = L"Restore defaults";
+			restoreDefaults.cch = sizeof(L"Restore defaults")/sizeof(WCHAR);
+			restoreDefaults.wID = 0x1030;
+
 			InsertMenuItemW(g_hMenu, 0, TRUE, &alwaysOnTop);
 			InsertMenuItemW(g_hMenu, 1, TRUE, &separator);
 			InsertMenuItemW(g_hMenu, 2, TRUE, &clearLog);
 			InsertMenuItemW(g_hMenu, 3, TRUE, &separator);
+			InsertMenuItemW(g_hMenu, 4, TRUE, &restoreDefaults);
 			g_hDlg = hDlg;
 			return TRUE;
 		}
@@ -146,16 +186,30 @@ INT_PTR __stdcall DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		case WM_SYSCOMMAND:
 		{
 			switch (wParam & 0xFFF0) {
-				case 0x1010:
+				case 0x1010: // Always on top
 				{
-					g_alwaysOnTop = !g_alwaysOnTop;
-					CheckMenuItem(g_hMenu, 0x1010, MF_BYCOMMAND | (g_alwaysOnTop ? MF_CHECKED : MF_UNCHECKED));
-					SetWindowPos(hDlg, (g_alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
+					g_bAlwaysOnTop = !g_bAlwaysOnTop;
+					CheckMenuItem(g_hMenu, 0x1010, MF_BYCOMMAND | (g_bAlwaysOnTop ? MF_CHECKED : MF_UNCHECKED));
+					SetWindowPos(hDlg, (g_bAlwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
 					return TRUE;
 				}
-				case 0x1020:
+				case 0x1020: // Clear log
 				{
 					SetWindowTextW(GetDlgItem(hDlg, IDC_EDIT1), L"");
+					return TRUE;
+				}
+				case 0x1030: // Restore defaults
+				{
+					int cx, cy;
+					g_uWidth = 600;
+					g_uHeight = 400;
+					g_bAlwaysOnTop = FALSE;
+					CheckMenuItem(g_hMenu, 0x1010, MF_BYCOMMAND | MF_UNCHECKED);
+					GetNewWindowSize(hDlg, g_uWidth, g_uHeight, &cx, &cy);
+					SetWindowPos(hDlg, HWND_NOTOPMOST, 0, 0, cx, cy, SWP_NOMOVE);
+					SetWindowPos(GetDlgItem(hDlg, IDC_EDIT1), hDlg, 0, 0, g_uWidth-GetSystemMetrics(SM_CXVSCROLL), g_uHeight-24, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+					RedrawWindow(hDlg, NULL, NULL, RDW_ERASE | RDW_INVALIDATE);
+					SaveOptions(hDlg);
 					return TRUE;
 				}
 				case SC_CLOSE:
@@ -189,26 +243,70 @@ INT_PTR __stdcall DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 		case WM_PAINT:
 		{
 			PAINTSTRUCT ps;
-			BITMAP bm;
+			UINT mx = g_uWidth / 32;
+			UINT my = g_uHeight / 32;
 			HDC hDC = BeginPaint(hDlg, &ps);
 			HDC MemDC = CreateCompatibleDC(hDC);
 			SelectObject(MemDC, g_hBitmap);
-			GetObjectW(g_hBitmap, sizeof(bm), &bm);
-			BitBlt(hDC, 0, 0, bm.bmWidth, bm.bmHeight, MemDC, 0, 0, SRCCOPY);
+
+			BitBlt(hDC, 0, 0, 32, 32, MemDC, 0, 0, SRCCOPY); // top-left
+			for (UINT y = 1; y < my; y++) {
+				BitBlt(hDC, 0, y*32, 32, 32, MemDC, 0, 32, SRCCOPY); // center-left
+			}
+			BitBlt(hDC, 0, g_uHeight-32, 32, 32, MemDC, 0, 64, SRCCOPY); // bottom-left
+
+			for (UINT x = 1; x < mx; x++) {
+				BitBlt(hDC, x * 32, 0, 32, 32, MemDC, 32, 0, SRCCOPY); // top-center
+				for (UINT y = 1; y < my; y++) {
+					BitBlt(hDC, x * 32, y * 32, 32, 32, MemDC, 32, 32, SRCCOPY); // center-center
+				}
+				BitBlt(hDC, x * 32, g_uHeight - 32, 32, 32, MemDC, 32, 64, SRCCOPY); // bottom-center
+			}
+
+			BitBlt(hDC, g_uWidth - 32, 0, 32, 32, MemDC, 64, 0, SRCCOPY); // top-right
+			for (UINT y = 1; y < my; y++) {
+				BitBlt(hDC, g_uWidth - 32, y*32, 32, 32, MemDC, 64, 32, SRCCOPY); // center-right
+			}
+			BitBlt(hDC, g_uWidth - 32, g_uHeight-32, 32, 32, MemDC, 64, 64, SRCCOPY); // bottom-right
+
 			DeleteDC(MemDC);
 			EndPaint(hDlg, &ps);
 			return TRUE;
 		}
 
-#if 0
 		case WM_SIZE:
 		{
-			UINT width = LOWORD(lParam)-9;
-			UINT height = HIWORD(lParam)-16;
-			SetWindowPos(GetDlgItem(hDlg, IDC_EDIT1), hDlg, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+			if (wParam != SIZE_MINIMIZED) {
+				g_uWidth = LOWORD(lParam);
+				g_uHeight = (HIWORD(lParam) >> 2) << 2;
+				if (wParam == SIZE_RESTORED || wParam == SIZE_MAXIMIZED) {
+					SetWindowPos(GetDlgItem(hDlg, IDC_EDIT1), hDlg, 0, 0, g_uWidth-GetSystemMetrics(SM_CXVSCROLL), g_uHeight-24, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+				}
+				RedrawWindow(hDlg, NULL, NULL, RDW_ERASE | RDW_INVALIDATE);
+			}
 			return FALSE;
 		}
-#endif
+
+		case WM_EXITSIZEMOVE:
+		{
+			int cx, cy;
+			GetNewWindowSize(hDlg, g_uWidth, g_uHeight, &cx, &cy);
+			SetWindowPos(hDlg, NULL, 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+			SetWindowPos(GetDlgItem(hDlg, IDC_EDIT1), hDlg, 0, 0, g_uWidth-GetSystemMetrics(SM_CXVSCROLL), g_uHeight-24, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+			RedrawWindow(hDlg, NULL, NULL, RDW_ERASE | RDW_INVALIDATE);
+			return FALSE;
+		}
+
+		case WM_GETMINMAXINFO:
+		{
+			LPMINMAXINFO lpmminfo = (LPMINMAXINFO)lParam;
+			int minx, miny;
+			GetNewWindowSize(hDlg, 200, 128, &minx, &miny);
+			lpmminfo->ptMaxSize.y = (lpmminfo->ptMaxSize.y >> 2) << 2;
+			lpmminfo->ptMinTrackSize.x = minx;
+			lpmminfo->ptMinTrackSize.y = miny;
+			return TRUE;
+		}
 
 		case WM_CLOSE:
 		{
